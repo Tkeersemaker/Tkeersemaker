@@ -9,13 +9,16 @@ Endpoints:
   GET  /health                         — health check
 """
 
+import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date as date_type
+from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from db import init_db, get_latest_snapshot, add_alert
 from playtomic import AMSTERDAM_VENUES, get_all_availability, get_availability, playtomic_booking_url
@@ -45,9 +48,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],  # Restrict to your domain in production
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -55,13 +58,89 @@ app.add_middleware(
 # Models
 # ---------------------------------------------------------------------------
 
+class Channel(str, Enum):
+    telegram = "telegram"
+    email = "email"
+
+
 class AlertRequest(BaseModel):
-    contact: str          # Telegram chat_id or email address
-    channel: str          # "telegram" | "email"
+    contact: str
+    channel: Channel
     venue_id: str
-    date: str             # YYYY-MM-DD
-    time_from: str        # "HH:MM"
-    time_to: str          # "HH:MM"
+    date: str    # YYYY-MM-DD
+    time_from: str  # HH:MM
+    time_to: str    # HH:MM
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        try:
+            target = date_type.fromisoformat(v)
+        except ValueError:
+            raise ValueError("Invalid date — use YYYY-MM-DD")
+        if target < date_type.today():
+            raise ValueError("Date cannot be in the past")
+        return v
+
+    @field_validator("time_from", "time_to")
+    @classmethod
+    def validate_time_format(cls, v: str) -> str:
+        if not re.match(r"^\d{2}:\d{2}$", v):
+            raise ValueError("Time must be in HH:MM format")
+        return v
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> "AlertRequest":
+        if self.time_from >= self.time_to:
+            raise ValueError("time_to must be after time_from")
+        return self
+
+    @field_validator("contact")
+    @classmethod
+    def validate_contact(cls, v: str, info) -> str:
+        channel = info.data.get("channel")
+        if channel == Channel.telegram and not v.lstrip("-").isdigit():
+            raise ValueError("Telegram contact must be a numeric chat ID")
+        if channel == Channel.email and not re.match(r"^[^@]+@[^@]+\.[^@]+$", v):
+            raise ValueError("Invalid email address")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_date(date_str: str | None) -> date_type:
+    if date_str is None:
+        return date_type.today()
+    try:
+        return date_type.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+
+def _get_venue(venue_id: str) -> dict:
+    venue = next((v for v in AMSTERDAM_VENUES if v["id"] == venue_id), None)
+    if not venue:
+        raise HTTPException(status_code=404, detail="Venue not found")
+    return venue
+
+
+async def _venue_availability(venue: dict, target: date_type) -> dict:
+    slots = get_latest_snapshot(venue["id"], target.isoformat())
+    if slots is None:
+        try:
+            slots = await get_availability(venue["id"], target)
+        except Exception as e:
+            logger.warning("Live fetch failed for %s: %s", venue["name"], e)
+            slots = []
+    return {
+        "venue_id": venue["id"],
+        "venue_name": venue["name"],
+        "booking_url": playtomic_booking_url(venue["id"]),
+        "date": target.isoformat(),
+        "slots": slots,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -83,64 +162,28 @@ def list_venues():
 
 @app.get("/availability")
 async def availability_all(
-    date: str = Query(default=None, description="YYYY-MM-DD — defaults to today")
+    date_str: str = Query(default=None, alias="date", description="YYYY-MM-DD — defaults to today")
 ):
-    target = _parse_date(date)
-    # Try cache first; fall back to live fetch.
-    results = []
-    for venue in AMSTERDAM_VENUES:
-        slots = get_latest_snapshot(venue["id"], target.isoformat())
-        if slots is None:
-            try:
-                slots = await get_availability(venue["id"], target)
-            except Exception as e:
-                logger.warning("Live fetch failed for %s: %s", venue["name"], e)
-                slots = []
-        results.append({
-            "venue_id": venue["id"],
-            "venue_name": venue["name"],
-            "booking_url": playtomic_booking_url(venue["id"]),
-            "date": target.isoformat(),
-            "slots": slots,
-        })
-    return results
+    target = _parse_date(date_str)
+    return list(await asyncio.gather(*[_venue_availability(v, target) for v in AMSTERDAM_VENUES]))
 
 
 @app.get("/availability/{venue_id}")
 async def availability_venue(
     venue_id: str,
-    date: str = Query(default=None, description="YYYY-MM-DD — defaults to today"),
+    date_str: str = Query(default=None, alias="date", description="YYYY-MM-DD — defaults to today"),
 ):
-    target = _parse_date(date)
-    venue = next((v for v in AMSTERDAM_VENUES if v["id"] == venue_id), None)
-    if not venue:
-        raise HTTPException(status_code=404, detail="Venue not found")
-
-    slots = get_latest_snapshot(venue_id, target.isoformat())
-    if slots is None:
-        try:
-            slots = await get_availability(venue_id, target)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Playtomic fetch failed: {e}")
-
-    return {
-        "venue_id": venue_id,
-        "venue_name": venue["name"],
-        "booking_url": playtomic_booking_url(venue_id),
-        "date": target.isoformat(),
-        "slots": slots,
-    }
+    target = _parse_date(date_str)
+    venue = _get_venue(venue_id)
+    return await _venue_availability(venue, target)
 
 
 @app.post("/alerts", status_code=201)
 def create_alert(req: AlertRequest):
-    venue = next((v for v in AMSTERDAM_VENUES if v["id"] == req.venue_id), None)
-    if not venue:
-        raise HTTPException(status_code=404, detail="Venue not found")
-
+    venue = _get_venue(req.venue_id)
     alert_id = add_alert(
         contact=req.contact,
-        channel=req.channel,
+        channel=req.channel.value,
         venue_id=req.venue_id,
         venue_name=venue["name"],
         date=req.date,
@@ -148,16 +191,3 @@ def create_alert(req: AlertRequest):
         time_to=req.time_to,
     )
     return {"alert_id": alert_id, "message": "Alert registered. You will be notified when the slot opens."}
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _parse_date(date_str: str | None) -> date:
-    if date_str is None:
-        return date.today()
-    try:
-        return date.fromisoformat(date_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")

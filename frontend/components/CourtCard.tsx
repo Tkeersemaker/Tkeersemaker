@@ -3,8 +3,9 @@
  * "Alert me" form to subscribe to Telegram notifications.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import TimeGrid from "./TimeGrid";
+import { API_URL } from "../lib/constants";
 
 export interface Slot {
   resource_id: string;
@@ -26,12 +27,9 @@ export interface VenueAvailability {
 
 interface Props {
   venue: VenueAvailability;
-  selectedDate: string;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-export default function CourtCard({ venue, selectedDate }: Props) {
+export default function CourtCard({ venue }: Props) {
   const [alertOpen, setAlertOpen] = useState(false);
   const [contact, setContact] = useState("");
   const [timeFrom, setTimeFrom] = useState("09:00");
@@ -39,8 +37,25 @@ export default function CourtCard({ venue, selectedDate }: Props) {
   const [alertStatus, setAlertStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
 
   const availableCount = venue.slots.length;
+  const timeRangeValid = timeFrom < timeTo;
+
+  // Auto-close the form 2s after a successful alert submission.
+  useEffect(() => {
+    if (alertStatus !== "done") return;
+    const timer = setTimeout(() => {
+      setAlertOpen(false);
+      setAlertStatus("idle");
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [alertStatus]);
+
+  const handleToggleAlert = () => {
+    setAlertOpen((v) => !v);
+    setAlertStatus("idle");
+  };
 
   const submitAlert = async () => {
+    if (!timeRangeValid) return;
     setAlertStatus("loading");
     try {
       const res = await fetch(`${API_URL}/alerts`, {
@@ -50,7 +65,7 @@ export default function CourtCard({ venue, selectedDate }: Props) {
           contact,
           channel: "telegram",
           venue_id: venue.venue_id,
-          date: selectedDate,
+          date: venue.date,
           time_from: timeFrom,
           time_to: timeTo,
         }),
@@ -77,7 +92,7 @@ export default function CourtCard({ venue, selectedDate }: Props) {
           <a href={venue.booking_url} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
             Open Playtomic
           </a>
-          <button className="btn btn-secondary" onClick={() => setAlertOpen((v) => !v)}>
+          <button className="btn btn-secondary" onClick={handleToggleAlert}>
             {alertOpen ? "Cancel" : "Notify me"}
           </button>
         </div>
@@ -91,7 +106,7 @@ export default function CourtCard({ venue, selectedDate }: Props) {
           <div className="alert-row">
             <input
               type="text"
-              placeholder="Telegram chat ID"
+              placeholder="Telegram chat ID (numbers only)"
               value={contact}
               onChange={(e) => setContact(e.target.value)}
               className="input"
@@ -102,17 +117,24 @@ export default function CourtCard({ venue, selectedDate }: Props) {
             <button
               className="btn btn-primary"
               onClick={submitAlert}
-              disabled={!contact || alertStatus === "loading"}
+              disabled={!contact || !timeRangeValid || alertStatus === "loading"}
             >
               {alertStatus === "loading" ? "Saving…" : "Set alert"}
             </button>
           </div>
-          {alertStatus === "done" && <p className="alert-success">Alert set! You'll receive a Telegram message when a slot opens.</p>}
-          {alertStatus === "error" && <p className="alert-error">Something went wrong. Please try again.</p>}
+          {!timeRangeValid && (
+            <p className="alert-error">End time must be after start time.</p>
+          )}
+          {alertStatus === "done" && (
+            <p className="alert-success">Alert set! You'll receive a Telegram message when a slot opens.</p>
+          )}
+          {alertStatus === "error" && (
+            <p className="alert-error">Something went wrong. Please try again.</p>
+          )}
         </div>
       )}
 
-      <TimeGrid slots={venue.slots} venueId={venue.venue_id} bookingUrl={venue.booking_url} />
+      <TimeGrid slots={venue.slots} bookingUrl={venue.booking_url} />
 
       <style jsx>{`
         .card {

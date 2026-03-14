@@ -1,17 +1,16 @@
 """
 Notification engine.
 
-On every poll cycle, compare new availability snapshots against pending alert
-subscriptions. If a slot that was previously booked is now free, fire an alert.
+On every poll cycle, compare new availability snapshots against the previous
+snapshot. Only fire an alert when a slot transitions from booked → free.
 """
 
 import os
 import logging
-from datetime import datetime
 
 import httpx
 
-from db import get_pending_alerts, mark_alert_triggered, get_latest_snapshot
+from db import get_pending_alerts, mark_alert_triggered, get_latest_snapshot, get_previous_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -27,33 +26,45 @@ async def send_telegram(chat_id: str, text: str) -> None:
         await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
 
-def slot_matches_window(slot: dict, time_from: str, time_to: str) -> bool:
-    """Check if a slot's start time falls within [time_from, time_to]."""
+def _slot_time(slot: dict) -> str | None:
+    """Extract HH:MM from a slot's ISO datetime start field."""
     try:
-        slot_time = slot["start"][11:16]  # "HH:MM" from ISO datetime
-        return time_from <= slot_time < time_to
-    except (KeyError, TypeError):
-        return False
+        return slot["start"][11:16]
+    except (KeyError, TypeError, IndexError):
+        return None
+
+
+def _slot_in_window(slot: dict, time_from: str, time_to: str) -> bool:
+    t = _slot_time(slot)
+    return t is not None and time_from <= t < time_to
 
 
 async def check_and_fire_alerts() -> None:
-    """Check all pending alerts against latest snapshots and fire if a slot opened up."""
+    """
+    Check all pending alerts against the latest snapshots.
+    Only fires when a slot is newly available (wasn't in the previous snapshot).
+    """
     alerts = get_pending_alerts()
     if not alerts:
         return
 
     for alert in alerts:
-        slots = get_latest_snapshot(alert["venue_id"], alert["date"])
-        if not slots:
+        current = get_latest_snapshot(alert["venue_id"], alert["date"])
+        if not current:
             continue
 
-        matching = [s for s in slots if slot_matches_window(s, alert["time_from"], alert["time_to"])]
+        previous = get_previous_snapshot(alert["venue_id"], alert["date"]) or []
+
+        # Only consider slots that weren't in the previous snapshot (newly freed).
+        previous_ids = {s.get("resource_id") for s in previous}
+        newly_free = [s for s in current if s.get("resource_id") not in previous_ids]
+
+        matching = [s for s in newly_free if _slot_in_window(s, alert["time_from"], alert["time_to"])]
         if not matching:
             continue
 
-        # A matching available slot was found — fire the alert.
         slot = matching[0]
-        slot_time = slot["start"][11:16]
+        slot_time = _slot_time(slot)
         message = (
             f"*Padel court available!* \n\n"
             f"Venue: *{alert['venue_name']}*\n"

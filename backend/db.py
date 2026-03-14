@@ -5,16 +5,22 @@ Uses plain sqlite3 — no ORM needed for this scale.
 
 import sqlite3
 import json
+import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC, timedelta
 
 DB_PATH = Path(__file__).parent / "padel.db"
+logger = logging.getLogger(__name__)
 
 
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def init_db() -> None:
@@ -52,7 +58,7 @@ def save_snapshot(venue_id: str, venue_name: str, date: str, slots: list) -> Non
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO availability_snapshots (venue_id, venue_name, date, slots_json, fetched_at) VALUES (?, ?, ?, ?, ?)",
-            (venue_id, venue_name, date, json.dumps(slots), datetime.utcnow().isoformat()),
+            (venue_id, venue_name, date, json.dumps(slots), _now()),
         )
 
 
@@ -62,9 +68,7 @@ def get_latest_snapshot(venue_id: str, date: str) -> list | None:
             "SELECT slots_json FROM availability_snapshots WHERE venue_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1",
             (venue_id, date),
         ).fetchone()
-    if row:
-        return json.loads(row["slots_json"])
-    return None
+    return json.loads(row["slots_json"]) if row else None
 
 
 def get_previous_snapshot(venue_id: str, date: str) -> list | None:
@@ -74,16 +78,14 @@ def get_previous_snapshot(venue_id: str, date: str) -> list | None:
             "SELECT slots_json FROM availability_snapshots WHERE venue_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1 OFFSET 1",
             (venue_id, date),
         ).fetchone()
-    if row:
-        return json.loads(row["slots_json"])
-    return None
+    return json.loads(row["slots_json"]) if row else None
 
 
 def add_alert(contact: str, channel: str, venue_id: str, venue_name: str, date: str, time_from: str, time_to: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO alert_subscriptions (contact, channel, venue_id, venue_name, date, time_from, time_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (contact, channel, venue_id, venue_name, date, time_from, time_to, datetime.utcnow().isoformat()),
+            (contact, channel, venue_id, venue_name, date, time_from, time_to, _now()),
         )
         return cur.lastrowid
 
@@ -99,3 +101,15 @@ def get_pending_alerts() -> list[dict]:
 def mark_alert_triggered(alert_id: int) -> None:
     with get_conn() as conn:
         conn.execute("UPDATE alert_subscriptions SET triggered = 1 WHERE id = ?", (alert_id,))
+
+
+def cleanup_old_snapshots(hours_back: int = 24) -> None:
+    """Delete snapshots older than hours_back hours to prevent unbounded DB growth."""
+    cutoff = (datetime.now(UTC) - timedelta(hours=hours_back)).isoformat()
+    with get_conn() as conn:
+        deleted = conn.execute(
+            "DELETE FROM availability_snapshots WHERE fetched_at < ?",
+            (cutoff,),
+        ).rowcount
+    if deleted:
+        logger.info("Cleaned up %d old snapshots (older than %dh)", deleted, hours_back)

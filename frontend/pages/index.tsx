@@ -8,16 +8,13 @@
 import { useEffect, useState, useCallback } from "react";
 import Head from "next/head";
 import CourtCard, { VenueAvailability } from "../components/CourtCard";
+import { API_URL } from "../lib/constants";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const REFRESH_MS = 2 * 60 * 1000; // 2 minutes
-
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
-}
+const TODAY_ISO = new Date().toISOString().slice(0, 10);
 
 export default function Home() {
-  const [date, setDate] = useState<string>(todayISO());
+  const [selectedDate, setSelectedDate] = useState<string>(TODAY_ISO);
   const [venues, setVenues] = useState<VenueAvailability[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +24,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/availability?date=${date}`);
+      const res = await fetch(`${API_URL}/availability?date=${selectedDate}`);
       if (!res.ok) throw new Error(`API error ${res.status}`);
       const data: VenueAvailability[] = await res.json();
       setVenues(data);
@@ -37,9 +34,9 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [date]);
+  }, [selectedDate]);
 
-  // Fetch on date change and every REFRESH_MS
+  // Fetch on date change and every REFRESH_MS.
   useEffect(() => {
     fetchAvailability();
     const interval = setInterval(fetchAvailability, REFRESH_MS);
@@ -79,9 +76,9 @@ export default function Home() {
             <input
               id="date-picker"
               type="date"
-              value={date}
-              min={todayISO()}
-              onChange={(e) => setDate(e.target.value)}
+              value={selectedDate}
+              min={TODAY_ISO}
+              onChange={(e) => setSelectedDate(e.target.value)}
               className="date-input"
             />
             {!loading && !error && (
@@ -103,7 +100,7 @@ export default function Home() {
             <div className="loading">Beschikbaarheid ophalen…</div>
           ) : (
             venues.map((venue) => (
-              <CourtCard key={venue.venue_id} venue={venue} selectedDate={date} />
+              <CourtCard key={venue.venue_id} venue={venue} />
             ))
           )}
         </div>

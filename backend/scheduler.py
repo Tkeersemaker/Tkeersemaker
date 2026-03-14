@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from playtomic import get_all_availability
-from db import save_snapshot
+from db import save_snapshot, cleanup_old_snapshots
 from alerts import check_and_fire_alerts
 
 logger = logging.getLogger(__name__)
@@ -23,15 +23,20 @@ DAYS_AHEAD = 6
 
 async def poll() -> None:
     logger.info("Polling Playtomic availability...")
-    for offset in range(DAYS_AHEAD + 1):
-        target = date.today() + timedelta(days=offset)
-        results = await get_all_availability(target)
+    targets = [date.today() + timedelta(days=offset) for offset in range(DAYS_AHEAD + 1)]
+
+    # Fetch all days concurrently.
+    all_results = await asyncio.gather(*[get_all_availability(target) for target in targets])
+
+    for results in all_results:
         for r in results:
-            save_snapshot(r["venue_id"], r["venue_name"], r["date"], r["slots"])
             if "error" in r:
                 logger.warning("Error fetching %s on %s: %s", r["venue_name"], r["date"], r["error"])
+            elif r["slots"]:
+                save_snapshot(r["venue_id"], r["venue_name"], r["date"], r["slots"])
 
     await check_and_fire_alerts()
+    cleanup_old_snapshots(hours_back=24)
     logger.info("Poll complete.")
 
 

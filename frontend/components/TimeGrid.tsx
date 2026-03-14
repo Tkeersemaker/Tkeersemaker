@@ -3,37 +3,37 @@
  * Green = available slot, grey = no data for that hour.
  */
 
+import { useMemo } from "react";
 import { Slot } from "./CourtCard";
 
 interface Props {
   slots: Slot[];
-  venueId: string;
   bookingUrl: string;
 }
 
 const HOURS = Array.from({ length: 16 }, (_, i) => i + 7); // 07:00 – 22:00
 
-export default function TimeGrid({ slots, venueId, bookingUrl }: Props) {
-  // Build a lookup: "HH" -> slot (first available slot starting in that hour)
-  const byHour: Record<string, Slot> = {};
-  for (const slot of slots) {
-    const hour = slot.start.slice(11, 13); // "HH" from ISO datetime
-    if (!byHour[hour]) {
-      byHour[hour] = slot;
+export default function TimeGrid({ slots, bookingUrl }: Props) {
+  const byHour = useMemo(() => {
+    const lookup: Record<string, Slot> = {};
+    for (const slot of slots) {
+      const hour = slot.start.slice(11, 13); // "HH" from ISO datetime
+      if (!lookup[hour]) lookup[hour] = slot;
     }
-  }
+    return lookup;
+  }, [slots]);
 
   return (
     <div className="time-grid">
       {HOURS.map((h) => {
         const label = `${String(h).padStart(2, "0")}:00`;
-        const slot = byHour[String(h).padStart(2, "0")];
-        const available = !!slot;
+        const hourKey = String(h).padStart(2, "0");
+        const slot = byHour[hourKey];
 
         return (
-          <div key={h} className={`time-cell ${available ? "available" : "unavailable"}`}>
+          <div key={h} className={`time-cell ${slot ? "available" : "unavailable"}`}>
             <span className="time-label">{label}</span>
-            {available && (
+            {slot && (
               <a
                 href={bookingUrl}
                 target="_blank"

@@ -5,10 +5,12 @@ The /v1/availability endpoint is publicly accessible (no auth required).
 Reference: https://mattrighetti.com/2025/03/03/reverse-engineering-playtomic
 """
 
+import asyncio
 import httpx
-from datetime import date, timedelta
+from datetime import date
 
 BASE_URL = "https://api.playtomic.io"
+PLAYTOMIC_TIMEOUT = 15
 
 # Amsterdam padel venues on Playtomic.
 # tenant_id values can be found by inspecting XHR requests on playtomic.io
@@ -28,6 +30,16 @@ AMSTERDAM_VENUES: list[dict] = [
 # → look for requests to /v1/tenants?sport_id=PADEL&... → copy the "tenant_id" values.
 
 
+def _build_availability_params(tenant_id: str, target_date: date) -> dict:
+    return {
+        "user_id": "-1",
+        "tenant_id": tenant_id,
+        "sport_id": "PADEL",
+        "start_min": f"{target_date.isoformat()}T00:00:00",
+        "start_max": f"{target_date.isoformat()}T23:59:00",
+    }
+
+
 async def get_venues() -> list[dict]:
     """Search Playtomic for padel venues in Amsterdam."""
     params = {
@@ -38,7 +50,7 @@ async def get_venues() -> list[dict]:
         "radius": 20000,               # 20 km radius in metres
         "size": 50,
     }
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=PLAYTOMIC_TIMEOUT) as client:
         r = await client.get(f"{BASE_URL}/v1/tenants", params=params)
         r.raise_for_status()
         return r.json()
@@ -61,60 +73,40 @@ async def get_availability(tenant_id: str, target_date: date | None = None) -> l
     if target_date is None:
         target_date = date.today()
 
-    start_min = f"{target_date.isoformat()}T00:00:00"
-    start_max = f"{target_date.isoformat()}T23:59:00"
-
-    params = {
-        "user_id": "-1",
-        "tenant_id": tenant_id,
-        "sport_id": "PADEL",
-        "start_min": start_min,
-        "start_max": start_max,
-    }
-
-    async with httpx.AsyncClient(timeout=15) as client:
+    params = _build_availability_params(tenant_id, target_date)
+    async with httpx.AsyncClient(timeout=PLAYTOMIC_TIMEOUT) as client:
         r = await client.get(f"{BASE_URL}/v1/availability", params=params)
         r.raise_for_status()
         return r.json()
 
 
 async def get_all_availability(target_date: date | None = None) -> list[dict]:
-    """Fetch availability for all tracked Amsterdam venues."""
+    """Fetch availability for all tracked Amsterdam venues concurrently."""
     if target_date is None:
         target_date = date.today()
 
-    results = []
-    async with httpx.AsyncClient(timeout=15) as client:
-        for venue in AMSTERDAM_VENUES:
-            start_min = f"{target_date.isoformat()}T00:00:00"
-            start_max = f"{target_date.isoformat()}T23:59:00"
-            params = {
-                "user_id": "-1",
-                "tenant_id": venue["id"],
-                "sport_id": "PADEL",
-                "start_min": start_min,
-                "start_max": start_max,
+    async def fetch_one(client: httpx.AsyncClient, venue: dict) -> dict:
+        params = _build_availability_params(venue["id"], target_date)
+        try:
+            r = await client.get(f"{BASE_URL}/v1/availability", params=params)
+            r.raise_for_status()
+            return {
+                "venue_id": venue["id"],
+                "venue_name": venue["name"],
+                "date": target_date.isoformat(),
+                "slots": r.json(),
             }
-            try:
-                r = await client.get(f"{BASE_URL}/v1/availability", params=params)
-                r.raise_for_status()
-                slots = r.json()
-                results.append({
-                    "venue_id": venue["id"],
-                    "venue_name": venue["name"],
-                    "date": target_date.isoformat(),
-                    "slots": slots,
-                })
-            except Exception as e:
-                results.append({
-                    "venue_id": venue["id"],
-                    "venue_name": venue["name"],
-                    "date": target_date.isoformat(),
-                    "slots": [],
-                    "error": str(e),
-                })
+        except Exception as e:
+            return {
+                "venue_id": venue["id"],
+                "venue_name": venue["name"],
+                "date": target_date.isoformat(),
+                "slots": [],
+                "error": str(e),
+            }
 
-    return results
+    async with httpx.AsyncClient(timeout=PLAYTOMIC_TIMEOUT) as client:
+        return list(await asyncio.gather(*[fetch_one(client, v) for v in AMSTERDAM_VENUES]))
 
 
 def playtomic_booking_url(tenant_id: str) -> str:
